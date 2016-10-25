@@ -111,7 +111,7 @@ def _fill_matrices(seqi, seqj, method, gap_open, gap_extend, gap_double,
                     pointer[i, j] = DIAG
 
 
-def _traceback(seqi, seqj, F, I, J, pointer, method, max_hits, flip):
+def _traceback(seqi, seqj, F, pointer, method, max_hits, flip):
     # container for traceback coordinates
     max_j = len(seqj)
     max_i = len(seqi)
@@ -282,4 +282,4 @@ def aligner(seqj, seqi, method='global', gap_open=-7, gap_extend=-7,
     _fill_matrices(seqi, seqj, method, gap_open, gap_extend, gap_double,
                    F, I, J, pointer, matrix)
 
-    return _traceback(seqi, seqj, F, I, J, pointer, method, max_hits, flip)
+    return _traceback(seqi, seqj, F, pointer, method, max_hits, flip)
