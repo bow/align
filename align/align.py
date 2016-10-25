@@ -56,6 +56,61 @@ def _init_matrices(max_i, max_j, method, gap_open, gap_extend):
     return F, I, J, pointer
 
 
+def _fill_matrices(seqi, seqj, method, gap_open, gap_extend, gap_double,
+                   F, I, J, pointer, matrix):
+    max_i = len(seqi)
+    max_j = len(seqj)
+
+    for i in range(1, max_i + 1):
+        ci = seqi[i - 1]
+        for j in range(1, max_j + 1):
+            cj = seqj[j - 1]
+            # I
+            I[i, j] = max(
+                         F[i, j - 1] + gap_open,
+                         I[i, j - 1] + gap_extend,
+                         J[i, j - 1] + gap_double)
+            # J
+            J[i, j] = max(
+                         F[i - 1, j] + gap_open,
+                         J[i - 1, j] + gap_extend,
+                         I[i - 1, j] + gap_double)
+            # F
+            diag_score = F[i - 1, j - 1] + matrix[cj][ci]
+            left_score = I[i, j]
+            up_score = J[i, j]
+            max_score = max(diag_score, up_score, left_score)
+
+            F[i, j] = max(0, max_score) if method == 'local' else max_score
+
+            if method == 'local':
+                if F[i, j] == 0:
+                    pass  # point[i,j] = NONE
+                elif max_score == diag_score:
+                    pointer[i, j] = DIAG
+                elif max_score == up_score:
+                    pointer[i, j] = UP
+                elif max_score == left_score:
+                    pointer[i, j] = LEFT
+            elif method == 'glocal':
+                # In a semi-global alignment we want to consume as much as
+                # possible of the longer sequence.
+                if max_score == up_score:
+                    pointer[i, j] = UP
+                elif max_score == diag_score:
+                    pointer[i, j] = DIAG
+                elif max_score == left_score:
+                    pointer[i, j] = LEFT
+            else:
+                # global
+                if max_score == up_score:
+                    pointer[i, j] = UP
+                elif max_score == left_score:
+                    pointer[i, j] = LEFT
+                else:
+                    pointer[i, j] = DIAG
+
+
 def _traceback(seqi, seqj, F, I, J, pointer, method, max_hits, flip):
     # container for traceback coordinates
     max_j = len(seqj)
@@ -224,53 +279,7 @@ def aligner(seqj, seqi, method='global', gap_open=-7, gap_extend=-7,
     F, I, J, pointer = _init_matrices(max_i, max_j, method, gap_open,
                                       gap_extend)
 
-    for i in range(1, max_i + 1):
-        ci = seqi[i - 1]
-        for j in range(1, max_j + 1):
-            cj = seqj[j - 1]
-            # I
-            I[i, j] = max(
-                         F[i, j - 1] + gap_open,
-                         I[i, j - 1] + gap_extend,
-                         J[i, j - 1] + gap_double)
-            # J
-            J[i, j] = max(
-                         F[i - 1, j] + gap_open,
-                         J[i - 1, j] + gap_extend,
-                         I[i - 1, j] + gap_double)
-            # F
-            diag_score = F[i - 1, j - 1] + matrix[cj][ci]
-            left_score = I[i, j]
-            up_score = J[i, j]
-            max_score = max(diag_score, up_score, left_score)
-
-            F[i, j] = max(0, max_score) if method == 'local' else max_score
-
-            if method == 'local':
-                if F[i, j] == 0:
-                    pass  # point[i,j] = NONE
-                elif max_score == diag_score:
-                    pointer[i, j] = DIAG
-                elif max_score == up_score:
-                    pointer[i, j] = UP
-                elif max_score == left_score:
-                    pointer[i, j] = LEFT
-            elif method == 'glocal':
-                # In a semi-global alignment we want to consume as much as
-                # possible of the longer sequence.
-                if max_score == up_score:
-                    pointer[i, j] = UP
-                elif max_score == diag_score:
-                    pointer[i, j] = DIAG
-                elif max_score == left_score:
-                    pointer[i, j] = LEFT
-            else:
-                # global
-                if max_score == up_score:
-                    pointer[i, j] = UP
-                elif max_score == left_score:
-                    pointer[i, j] = LEFT
-                else:
-                    pointer[i, j] = DIAG
+    _fill_matrices(seqi, seqj, method, gap_open, gap_extend, gap_double,
+                   F, I, J, pointer, matrix)
 
     return _traceback(seqi, seqj, F, I, J, pointer, method, max_hits, flip)
