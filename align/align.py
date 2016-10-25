@@ -14,6 +14,45 @@ AlignmentResult = namedtuple(
      'end1', 'end2', 'n_gaps1', 'n_gaps2',
      'n_mismatches', 'score'])
 
+# Directions for traceback
+NONE, LEFT, UP, DIAG = range(4)  # NONE is 0
+
+
+def _init_matrices(max_i, max_j, method, gap_open, gap_extend):
+    """Given the length of each strings to be aligned, the alignment method,
+    gap open, and gap extension scores, return matrices for alignment.
+
+    The matrices are returned as a tuple of four items:
+        1. Matrix of alignment scores.
+        2. Matrix of deletion scores on the i sequence.
+        3. Matrix of deletion scores on the j sequence.
+        4. Matrix of traceback directions.
+
+    """
+    F = np.zeros((max_i + 1, max_j + 1), dtype=np.float32)
+    I = np.ndarray((max_i + 1, max_j + 1), dtype=np.float32)
+    I.fill(-np.inf)
+    J = np.ndarray((max_i + 1, max_j + 1), dtype=np.float32)
+    J.fill(-np.inf)
+    pointer = np.zeros((max_i + 1, max_j + 1), dtype=np.uint)  # NONE
+
+    if method == 'global':
+        pointer[0, 1:] = LEFT
+        pointer[1:, 0] = UP
+        F[0, 1:] = gap_open + gap_extend * \
+            np.arange(0, max_j, dtype=np.float32)
+        F[1:, 0] = gap_open + gap_extend * \
+            np.arange(0, max_i, dtype=np.float32)
+    elif method == 'global_cfe':
+        pointer[0, 1:] = LEFT
+        pointer[1:, 0] = UP
+    elif method == 'glocal':
+        pointer[0, 1:] = LEFT
+        F[0, 1:] = gap_open + gap_extend * \
+            np.arange(0, max_j, dtype=np.float32)
+
+    return F, I, J, pointer
+
 
 def aligner(seqj, seqi, method='global', gap_open=-7, gap_extend=-7,
             gap_double=-7, matrix=BLOSUM62, max_hits=1):
@@ -51,7 +90,6 @@ def aligner(seqj, seqi, method='global', gap_open=-7, gap_extend=-7,
           are returned.
     '''
     assert max_hits is None or max_hits > 0
-    NONE, LEFT, UP, DIAG = range(4)  # NONE is 0
     GAP_CHAR = '-'
     max_j = len(seqj)
     max_i = len(seqi)
@@ -63,27 +101,8 @@ def aligner(seqj, seqi, method='global', gap_open=-7, gap_extend=-7,
     else:
         flip = 0
 
-    F = np.zeros((max_i + 1, max_j + 1), dtype=np.float32)
-    I = np.ndarray((max_i + 1, max_j + 1), dtype=np.float32)
-    I.fill(-np.inf)
-    J = np.ndarray((max_i + 1, max_j + 1), dtype=np.float32)
-    J.fill(-np.inf)
-    pointer = np.zeros((max_i + 1, max_j + 1), dtype=np.uint)  # NONE
-
-    if method == 'global':
-        pointer[0, 1:] = LEFT
-        pointer[1:, 0] = UP
-        F[0, 1:] = gap_open + gap_extend * \
-            np.arange(0, max_j, dtype=np.float32)
-        F[1:, 0] = gap_open + gap_extend * \
-            np.arange(0, max_i, dtype=np.float32)
-    elif method == 'global_cfe':
-        pointer[0, 1:] = LEFT
-        pointer[1:, 0] = UP
-    elif method == 'glocal':
-        pointer[0, 1:] = LEFT
-        F[0, 1:] = gap_open + gap_extend * \
-            np.arange(0, max_j, dtype=np.float32)
+    F, I, J, pointer = _init_matrices(max_i, max_j, method, gap_open,
+                                      gap_extend)
 
     for i in range(1, max_i + 1):
         ci = seqi[i - 1]
