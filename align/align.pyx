@@ -1,8 +1,13 @@
+# cython: profile=True
 # -*- coding: utf-8 -*-
 
 from collections import namedtuple
 
 import numpy as np
+
+cimport numpy as np
+cimport cython
+from libc.string cimport strlen
 
 from .matrix import BLOSUM62
 
@@ -13,121 +18,154 @@ AlignmentResult = namedtuple(
     ['seq1', 'seq2', 'start1', 'start2',
      'end1', 'end2', 'n_gaps1', 'n_gaps2',
      'n_mismatches', 'score'])
+cdef struct aln_res:
+    char* seq1
+    char* seq2
+    int start1, start2, end1, end2, n_gaps1, n_gaps2, n_mismatches
+    double score
 
 # Directions for traceback
-NONE, LEFT, UP, DIAG = range(4)  # NONE is 0
+cdef:
+    int NONE = 0, LEFT = 1, UP = 2, DIAG = 3
 # Character to represent gaps
 GAP_CHAR = '-'
+# Supported methods
+METHODS = {
+    "global": 0, "local": 1, "glocal": 2, "global_cfe": 3,
+}
+
+ctypedef np.int_t DTYPE_INT
+ctypedef np.uint_t DTYPE_UINT
+ctypedef np.float32_t DTYPE_FLOAT
 
 
-def _init_matrices(max_i, max_j, method, gap_open, gap_extend):
-    """Given the length of each strings to be aligned, the alignment method,
-    gap open, and gap extension scores, return matrices for alignment.
+cdef inline DTYPE_FLOAT max3(DTYPE_FLOAT a, DTYPE_FLOAT b, DTYPE_FLOAT c):
+    if c > b:
+        return c  if c > a else a
+    return b if b > a else a
 
-    The matrices are returned as a tuple of four items:
-        1. Matrix of alignment scores.
-        2. Matrix of deletion scores on the i sequence.
-        3. Matrix of deletion scores on the j sequence.
-        4. Matrix of traceback directions.
 
-    """
-    F = np.zeros((max_i + 1, max_j + 1), dtype=np.float32)
-    I = np.ndarray((max_i + 1, max_j + 1), dtype=np.float32)
-    I.fill(-np.inf)
-    J = np.ndarray((max_i + 1, max_j + 1), dtype=np.float32)
-    J.fill(-np.inf)
-    pointer = np.zeros((max_i + 1, max_j + 1), dtype=np.uint)  # NONE
+cdef inline DTYPE_FLOAT max2(DTYPE_FLOAT a, DTYPE_FLOAT b):
+    return b if b > a else a
 
-    if method == 'global':
+
+cdef DTYPE_FLOAT[:, :] make_cmatrix(dict pymatrix):
+    cdef:
+        DTYPE_INT size = sorted([ord(c) for c in pymatrix.keys()]).pop() + 1
+        DTYPE_FLOAT score
+        np.int8_t c1, c2
+        np.ndarray[DTYPE_FLOAT, ndim=2] cmatrix = np.zeros((size, size),
+                                                           dtype=np.float32)
+
+    for char1 in pymatrix.keys():
+        for char2, score in pymatrix[char1].items():
+            c1 = ord(char1)
+            c2 = ord(char2)
+            cmatrix[c1, c2] = score
+
+    return cmatrix
+
+
+cdef list caligner(char* seqi, char* seqj, int method,
+    DTYPE_FLOAT gap_open, DTYPE_FLOAT gap_extend, DTYPE_FLOAT gap_double,
+    DTYPE_FLOAT[:, :] matrix, max_hits, bint flip):
+
+    cdef:
+        int max_i = strlen(seqi)
+        int max_j = strlen(seqj)
+        np.ndarray[DTYPE_FLOAT, ndim=2] F = np.zeros((max_i + 1, max_j + 1), dtype=np.float32)
+        DTYPE_FLOAT[:, :] Fview = F
+        DTYPE_FLOAT[:, :] I = np.ndarray((max_i + 1, max_j + 1), dtype=np.float32)
+        DTYPE_FLOAT[:, :] J = np.ndarray((max_i + 1, max_j + 1), dtype=np.float32)
+        DTYPE_UINT[:, :] pointer = np.zeros((max_i + 1, max_j + 1), dtype=np.uint)  # NONE
+        int i, j, ci, cj
+        DTYPE_FLOAT diag_score, left_score, up_score, max_score
+        int NONE = 0, LEFT = 1, UP = 2, DIAG = 3
+        # methods: global: 0, local: 1, glocal: 2, global_cfe: 3
+
+    I[:, :] = -np.inf
+    J[:, :] = -np.inf
+
+    if method == 0:
         pointer[0, 1:] = LEFT
         pointer[1:, 0] = UP
         F[0, 1:] = gap_open + gap_extend * \
             np.arange(0, max_j, dtype=np.float32)
         F[1:, 0] = gap_open + gap_extend * \
             np.arange(0, max_i, dtype=np.float32)
-    elif method == 'global_cfe':
+    elif method == 3:
         pointer[0, 1:] = LEFT
         pointer[1:, 0] = UP
-    elif method == 'glocal':
+    elif method == 2:
         pointer[0, 1:] = LEFT
         F[0, 1:] = gap_open + gap_extend * \
             np.arange(0, max_j, dtype=np.float32)
 
-    return F, I, J, pointer
+    with cython.boundscheck(False), cython.wraparound(False):
+        for i in range(1, max_i + 1):
+            ci = seqi[i - 1]
+            for j in range(1, max_j + 1):
+                cj = seqj[j - 1]
+                # I
+                I[i, j] = max3(
+                            F[i, j - 1] + gap_open,
+                            I[i, j - 1] + gap_extend,
+                            J[i, j - 1] + gap_double)
+                # J
+                J[i, j] = max3(
+                            F[i - 1, j] + gap_open,
+                            J[i - 1, j] + gap_extend,
+                            I[i - 1, j] + gap_double)
+                # F
+                diag_score = Fview[i - 1, j - 1] + matrix[cj][ci]
+                left_score = I[i, j]
+                up_score = J[i, j]
+                max_score = max3(diag_score, up_score, left_score)
 
+                Fview[i, j] = max2(0, max_score) if method == 1 else max_score
 
-def _fill_matrices(seqi, seqj, method, gap_open, gap_extend, gap_double,
-                   F, I, J, pointer, matrix):
-    max_i = len(seqi)
-    max_j = len(seqj)
-
-    for i in range(1, max_i + 1):
-        ci = seqi[i - 1]
-        for j in range(1, max_j + 1):
-            cj = seqj[j - 1]
-            # I
-            I[i, j] = max(
-                         F[i, j - 1] + gap_open,
-                         I[i, j - 1] + gap_extend,
-                         J[i, j - 1] + gap_double)
-            # J
-            J[i, j] = max(
-                         F[i - 1, j] + gap_open,
-                         J[i - 1, j] + gap_extend,
-                         I[i - 1, j] + gap_double)
-            # F
-            diag_score = F[i - 1, j - 1] + matrix[cj][ci]
-            left_score = I[i, j]
-            up_score = J[i, j]
-            max_score = max(diag_score, up_score, left_score)
-
-            F[i, j] = max(0, max_score) if method == 'local' else max_score
-
-            if method == 'local':
-                if F[i, j] == 0:
-                    pass  # point[i,j] = NONE
-                elif max_score == diag_score:
-                    pointer[i, j] = DIAG
-                elif max_score == up_score:
-                    pointer[i, j] = UP
-                elif max_score == left_score:
-                    pointer[i, j] = LEFT
-            elif method == 'glocal':
-                # In a semi-global alignment we want to consume as much as
-                # possible of the longer sequence.
-                if max_score == up_score:
-                    pointer[i, j] = UP
-                elif max_score == diag_score:
-                    pointer[i, j] = DIAG
-                elif max_score == left_score:
-                    pointer[i, j] = LEFT
-            else:
-                # global
-                if max_score == up_score:
-                    pointer[i, j] = UP
-                elif max_score == left_score:
-                    pointer[i, j] = LEFT
+                if method == 1:
+                    if Fview[i, j] == 0:
+                        pass  # point[i,j] = NONE
+                    elif max_score == diag_score:
+                        pointer[i, j] = DIAG
+                    elif max_score == up_score:
+                        pointer[i, j] = UP
+                    elif max_score == left_score:
+                        pointer[i, j] = LEFT
+                elif method == 2:
+                    # In a semi-global alignment we want to consume as much as
+                    # possible of the longer sequence.
+                    if max_score == up_score:
+                        pointer[i, j] = UP
+                    elif max_score == diag_score:
+                        pointer[i, j] = DIAG
+                    elif max_score == left_score:
+                        pointer[i, j] = LEFT
                 else:
-                    pointer[i, j] = DIAG
+                    # global
+                    if max_score == up_score:
+                        pointer[i, j] = UP
+                    elif max_score == left_score:
+                        pointer[i, j] = LEFT
+                    else:
+                        pointer[i, j] = DIAG
 
+    cdef:
+        list ij_pairs
 
-def _traceback(seqi, seqj, F, pointer, method, max_hits, flip):
-    # container for traceback coordinates
-    max_j = len(seqj)
-    max_i = len(seqi)
     ij_pairs = []
-    if method == 'local':
-        # max anywhere
+    if method == 1:
         maxv_indices = np.argwhere(F == F.max())[:max_hits]
         for index in maxv_indices:
             ij_pairs.append(index)
-    elif method == 'glocal':
+    elif method == 2:
         # max in last col
         maxi_indices = np.argwhere(F[:, -1] == F[:, -1].max())\
             .flatten()[:max_hits]
         for i in maxi_indices:
             ij_pairs.append((i, max_j))
-    elif method == 'global_cfe':
+    elif method == 3:
         # from i,j to max(max(last row), max(last col)) for free
         row_max = F[-1].max()
         col_max = F[:, -1].max()
@@ -167,6 +205,9 @@ def _traceback(seqi, seqj, F, pointer, method, max_hits, flip):
         # method must be global at this point
         ij_pairs.append((max_i, max_j))
 
+    cdef:
+        int p, end_i, end_j, n_gaps_i, n_gaps_j, n_mmatch
+
     results = []
     for cur_i, (i, j) in enumerate(ij_pairs):
         align_j = []
@@ -174,7 +215,7 @@ def _traceback(seqi, seqj, F, pointer, method, max_hits, flip):
         score = F[i, j]
         p = pointer[i, j]
         # mimic Python's coord system
-        if method.startswith("global"):
+        if method == 0 or method == 3:
             end_i, end_j = max_i, max_j
         else:
             end_i, end_j = i, j
@@ -182,14 +223,14 @@ def _traceback(seqi, seqj, F, pointer, method, max_hits, flip):
 
         # special case for global_cfe ~ one cell may contain multiple pointer
         # directions
-        if method == 'global_cfe':
+        if method == 3:
             if i < max_i:
-                align_i.extend([c for c in seqi[i:][::-1]])
+                align_i.extend([chr(c) for c in seqi[i:][::-1]])
                 align_j.extend([GAP_CHAR] * (max_i - i))
                 n_gaps_j += 1
             elif j < max_j:
                 align_i.extend([GAP_CHAR] * (max_j - j))
-                align_j.extend([c for c in seqj[j:][::-1]])
+                align_j.extend([chr(c) for c in seqj[j:][::-1]])
                 n_gaps_i += 1
 
         while p != NONE:
@@ -200,17 +241,17 @@ def _traceback(seqi, seqj, F, pointer, method, max_hits, flip):
                 jchar = seqj[j]
                 if ichar != jchar:
                     n_mmatch += 1
-                align_j.append(jchar)
-                align_i.append(ichar)
+                align_j.append(chr(jchar))
+                align_i.append(chr(ichar))
             elif p == LEFT:
                 j -= 1
-                align_j.append(seqj[j])
+                align_j.append(chr(seqj[j]))
                 if not align_i or align_i[-1] != GAP_CHAR:
                     n_gaps_i += 1
                 align_i.append(GAP_CHAR)
             elif p == UP:
                 i -= 1
-                align_i.append(seqi[i])
+                align_i.append(chr(seqi[i]))
                 if not align_j or align_j[-1] != GAP_CHAR:
                     n_gaps_j += 1
                 align_j.append(GAP_CHAR)
@@ -276,10 +317,9 @@ def aligner(seqj, seqi, method='global', gap_open=-7, gap_extend=-7,
     else:
         flip = 0
 
-    F, I, J, pointer = _init_matrices(max_i, max_j, method, gap_open,
-                                      gap_extend)
+    seq1 = seqi if isinstance(seqi, bytes) else bytes(seqi, 'utf8')
+    seq2 = seqj if isinstance(seqj, bytes) else bytes(seqj, 'utf8')
 
-    _fill_matrices(seqi, seqj, method, gap_open, gap_extend, gap_double,
-                   F, I, J, pointer, matrix)
-
-    return _traceback(seqi, seqj, F, pointer, method, max_hits, flip)
+    return caligner(seq1, seq2,
+                    METHODS[method], gap_open, gap_extend, gap_double,
+                    make_cmatrix(matrix), max_hits, flip)
