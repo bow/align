@@ -42,7 +42,7 @@ ctypedef np.float32_t DTYPE_FLOAT
 
 cdef inline DTYPE_FLOAT max3(DTYPE_FLOAT a, DTYPE_FLOAT b, DTYPE_FLOAT c):
     if c > b:
-        return c  if c > a else a
+        return c if c > a else a
     return b if b > a else a
 
 
