@@ -4,10 +4,10 @@
 from collections import namedtuple
 
 import numpy as np
-
 cimport numpy as np
 cimport cython
 from libc.string cimport strlen
+from cpython.mem cimport PyMem_Malloc, PyMem_Free
 
 from .matrix import BLOSUM62
 
@@ -24,11 +24,12 @@ cdef struct aln_res:
     int start1, start2, end1, end2, n_gaps1, n_gaps2, n_mismatches
     double score
 
-# Directions for traceback
 cdef:
+    # Directions for traceback
     int NONE = 0, LEFT = 1, UP = 2, DIAG = 3
-# Character to represent gaps
-GAP_CHAR = '-'
+    # Character to represent gaps
+    char GAP_CHAR = b'-'
+
 # Supported methods
 METHODS = {
     "global": 0, "local": 1, "glocal": 2, "global_cfe": 3,
@@ -82,6 +83,11 @@ cdef list caligner(char* seqi, char* seqj, int method,
         DTYPE_FLOAT diag_score, left_score, up_score, max_score
         int NONE = 0, LEFT = 1, UP = 2, DIAG = 3
         # methods: global: 0, local: 1, glocal: 2, global_cfe: 3
+        list ij_pairs = [], results = []
+        int p, end_i, end_j, n_gaps_i, n_gaps_j, n_mmatch, seqlen, idx, aln_counter
+        unsigned char* align_i
+        unsigned char* align_j
+        DTYPE_FLOAT score
 
     I[:, :] = -np.inf
     J[:, :] = -np.inf
@@ -152,9 +158,9 @@ cdef list caligner(char* seqi, char* seqj, int method,
                         pointer[i, j] = DIAG
 
     cdef:
-        list ij_pairs
+        int row_max, col_max, ncol_idces, nrow_idces, cid, rid
+        long[:, :] col_idces, row_idces
 
-    ij_pairs = []
     if method == 1:
         maxv_indices = np.argwhere(F == F.max())[:max_hits]
         for index in maxv_indices:
@@ -205,13 +211,7 @@ cdef list caligner(char* seqi, char* seqj, int method,
         # method must be global at this point
         ij_pairs.append((max_i, max_j))
 
-    cdef:
-        int p, end_i, end_j, n_gaps_i, n_gaps_j, n_mmatch
-
-    results = []
-    for cur_i, (i, j) in enumerate(ij_pairs):
-        align_j = []
-        align_i = []
+    for i, j in ij_pairs:
         score = F[i, j]
         p = pointer[i, j]
         # mimic Python's coord system
@@ -220,51 +220,61 @@ cdef list caligner(char* seqi, char* seqj, int method,
         else:
             end_i, end_j = i, j
         n_gaps_i, n_gaps_j, n_mmatch = 0, 0, 0
+        aln_counter = 0
+        seqlen = max_i + max_j
+        align_i = <unsigned char *>PyMem_Malloc(seqlen * sizeof(unsigned char))
+        align_j = <unsigned char *>PyMem_Malloc(seqlen * sizeof(unsigned char))
 
         # special case for global_cfe ~ one cell may contain multiple pointer
         # directions
         if method == 3:
             if i < max_i:
-                align_i.extend([chr(c) for c in seqi[i:][::-1]])
-                align_j.extend([GAP_CHAR] * (max_i - i))
                 n_gaps_j += 1
+                for idx in range(max_i - i):
+                    align_j[idx] = GAP_CHAR
+                    align_i[idx] = seqi[-1 * (idx + 1)]
             elif j < max_j:
-                align_i.extend([GAP_CHAR] * (max_j - j))
-                align_j.extend([chr(c) for c in seqj[j:][::-1]])
                 n_gaps_i += 1
+                for idx in range(max_j - j):
+                    align_i[idx] = GAP_CHAR
+                    align_j[idx] = seqj[-1 * (idx + 1)]
 
         while p != NONE:
             if p == DIAG:
                 i -= 1
                 j -= 1
-                ichar = seqi[i]
-                jchar = seqj[j]
-                if ichar != jchar:
+                if seqi[i] != seqj[j]:
                     n_mmatch += 1
-                align_j.append(chr(jchar))
-                align_i.append(chr(ichar))
+                align_j[aln_counter] = seqj[j]
+                align_i[aln_counter] = seqi[i]
             elif p == LEFT:
                 j -= 1
-                align_j.append(chr(seqj[j]))
-                if not align_i or align_i[-1] != GAP_CHAR:
+                align_j[aln_counter] = seqj[j]
+                if align_i[aln_counter - 1] != GAP_CHAR or aln_counter == 0:
                     n_gaps_i += 1
-                align_i.append(GAP_CHAR)
+                align_i[aln_counter] = GAP_CHAR
             elif p == UP:
                 i -= 1
-                align_i.append(chr(seqi[i]))
-                if not align_j or align_j[-1] != GAP_CHAR:
+                align_i[aln_counter] = seqi[i]
+                if align_j[aln_counter - 1] != GAP_CHAR or aln_counter == 0:
                     n_gaps_j += 1
-                align_j.append(GAP_CHAR)
+                align_j[aln_counter] = GAP_CHAR
             else:
                 raise Exception('wtf!')
             p = pointer[i, j]
-        align_i = ''.join(align_i[::-1])
-        align_j = ''.join(align_j[::-1])
-        aln = (AlignmentResult(align_i, align_j, i, j, end_i, end_j,
-                               n_gaps_i, n_gaps_j, n_mmatch, score)
-               if flip else
-               AlignmentResult(align_j, align_i, j, i, end_j, end_i,
-                               n_gaps_j, n_gaps_i, n_mmatch, score))
+            aln_counter += 1
+
+        alns_i = bytes(align_i[:aln_counter][::-1])
+        alns_j = bytes(align_j[:aln_counter][::-1])
+
+        PyMem_Free(align_i)
+        PyMem_Free(align_j)
+
+        aln = (AlignmentResult(alns_i, alns_j, i, j, end_i, end_j,
+                            n_gaps_i, n_gaps_j, n_mmatch, score)
+            if flip else
+            AlignmentResult(alns_j, alns_i, j, i, end_j, end_i,
+                            n_gaps_j, n_gaps_i, n_mmatch, score))
 
         results.append(aln)
 
@@ -317,8 +327,8 @@ def aligner(seqj, seqi, method='global', gap_open=-7, gap_extend=-7,
     else:
         flip = 0
 
-    seq1 = seqi if isinstance(seqi, bytes) else bytes(seqi, 'utf8')
-    seq2 = seqj if isinstance(seqj, bytes) else bytes(seqj, 'utf8')
+    seq1 = seqi if isinstance(seqi, bytes) else bytes(seqi, 'ascii')
+    seq2 = seqj if isinstance(seqj, bytes) else bytes(seqj, 'ascii')
 
     return caligner(seq1, seq2,
                     METHODS[method], gap_open, gap_extend, gap_double,
